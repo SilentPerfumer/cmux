@@ -1858,6 +1858,9 @@ final class CmuxConfigStore: ObservableObject {
 
     nonisolated private static func defaultGlobalConfigPath() -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if Bundle.main.bundleIdentifier?.hasPrefix("com.foundationos.demi-c") == true {
+            return (home as NSString).appendingPathComponent(".config/demi-c/cmux.json")
+        }
         return (home as NSString).appendingPathComponent(".config/cmux/cmux.json")
     }
 

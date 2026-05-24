@@ -44,13 +44,13 @@
 	<key>NSMainStoryboardFile</key>
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>A program running within cmux would like to use your microphone.</string>
+	<string>A program running within DEMI-C would like to use your microphone.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>A program running within cmux would like to use your camera.</string>
+	<string>A program running within DEMI-C would like to use your camera.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>A program running within cmux would like to use Bluetooth to discover passkeys and security keys.</string>
+	<string>A program running within DEMI-C would like to use Bluetooth to discover passkeys and security keys.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>A program running within cmux would like to use AppleScript.</string>
+	<string>A program running within DEMI-C would like to use AppleScript.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -177,9 +177,9 @@
 	<key>SUAutomaticallyUpdate</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SUFeedURL</key>
-	<string>https://github.com/manaflow-ai/cmux/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/SilentPerfumer/cmux/releases/latest/download/appcast.xml</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUSendProfileInfo</key>

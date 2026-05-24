@@ -114,13 +114,40 @@ if [[ -z "$OUTPUT_PATH" ]]; then
   exit 1
 fi
 
-# Allow CI to skip the zig build (e.g., macOS 26 where zig 0.15.2 can't link).
-# Creates a stub binary so the Xcode Run Script file-existence check passes.
-if [[ "${CMUX_SKIP_ZIG_BUILD:-}" == "1" ]]; then
-  echo "Skipping zig CLI helper build (CMUX_SKIP_ZIG_BUILD=1)"
+should_stub_cli_helper() {
+  if [[ "${CMUX_SKIP_ZIG_BUILD:-}" == "1" ]]; then
+    return 0
+  fi
+
+  # DEMI-C uses the embedded GhosttyKit surface for the app shell. The bundled
+  # ghostty CLI helper is useful but not required for validating the forked app,
+  # so local DEMI-C dev builds should not hard-fail only because Zig is absent.
+  if [[ "${PRODUCT_BUNDLE_IDENTIFIER:-}" == com.foundationos.demi-c* ]] &&
+     ! command -v zig >/dev/null 2>&1 &&
+     [[ ! -x /opt/homebrew/bin/zig ]] &&
+     [[ ! -x /usr/local/bin/zig ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+create_cli_helper_stub() {
+  local reason="$1"
+  echo "Skipping zig CLI helper build (${reason})"
   mkdir -p "$(dirname "$OUTPUT_PATH")"
   printf '#!/bin/sh\necho "ghostty CLI helper stub (zig build skipped)" >&2\nexit 1\n' > "$OUTPUT_PATH"
   chmod +x "$OUTPUT_PATH"
+}
+
+# Allow CI and DEMI-C local dev builds to skip the zig build. Creates a stub
+# binary so the Xcode Run Script file-existence check passes.
+if should_stub_cli_helper; then
+  if [[ "${CMUX_SKIP_ZIG_BUILD:-}" == "1" ]]; then
+    create_cli_helper_stub "CMUX_SKIP_ZIG_BUILD=1"
+  else
+    create_cli_helper_stub "DEMI-C dev build without zig"
+  fi
   exit 0
 fi
 

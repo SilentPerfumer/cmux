@@ -7393,11 +7393,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     ) -> UUID {
         reserveInitialSocketPathIfNeeded()
         let windowId = UUID()
+        let demiLaunchContext = (initialTerminalInput == nil && sessionWindowSnapshot == nil)
+            ? DemiCmuxConfigSync.defaultLaunchContext()
+            : nil
         let tabManager = TabManager(
-            initialWorkspaceTitle: initialWorkspaceTitle,
-            initialWorkingDirectory: initialWorkingDirectory,
+            initialWorkspaceTitle: initialWorkspaceTitle ?? demiLaunchContext?.title,
+            initialWorkingDirectory: initialWorkingDirectory ?? demiLaunchContext?.workingDirectory,
+            initialTerminalCommand: demiLaunchContext?.command,
             initialTerminalInput: initialTerminalInput,
-            autoWelcomeIfNeeded: initialTerminalInput == nil
+            autoWelcomeIfNeeded: initialTerminalInput == nil && demiLaunchContext == nil
         )
         if let tabManagerSnapshot = sessionWindowSnapshot?.tabManager {
             tabManager.restoreSessionSnapshot(tabManagerSnapshot)
@@ -7606,12 +7610,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             setActiveMainWindow(window)
             bringToFront(window)
         }
-        let workspace = context.tabManager.addWorkspace(select: true, autoWelcomeIfNeeded: false)
-        sendWelcomeCommandWhenReady(to: workspace)
+        if let demiLaunchContext = DemiCmuxConfigSync.defaultLaunchContext() {
+            _ = context.tabManager.addWorkspace(
+                title: demiLaunchContext.title,
+                workingDirectory: demiLaunchContext.workingDirectory,
+                initialTerminalCommand: demiLaunchContext.command,
+                inheritWorkingDirectory: false,
+                select: true,
+                autoWelcomeIfNeeded: false
+            )
+        } else {
+            let workspace = context.tabManager.addWorkspace(select: true, autoWelcomeIfNeeded: false)
+            sendWelcomeCommandWhenReady(to: workspace)
+        }
     }
 
     func sendWelcomeCommandWhenReady(to workspace: Workspace, markShownOnSend: Bool = false) {
-        sendTextWhenReady("cmux welcome\n", to: workspace) {
+        let command = DemiCmuxConfigSync.defaultLaunchCommand() ?? "cmux welcome"
+        sendTextWhenReady("\(command)\n", to: workspace) {
             if markShownOnSend {
                 UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
             }

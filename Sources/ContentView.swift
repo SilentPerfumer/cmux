@@ -2615,6 +2615,14 @@ struct ContentView: View {
                             .padding(.top, 4)
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    if DemiOverlaySettings.isEnabled {
+                        DemiOverlayView()
+                            .padding(.top, isMinimalMode ? 14 : 50)
+                            .padding(.trailing, 14)
+                            .zIndex(1200)
+                    }
+                }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
                 .background(Color.clear)
                 .background(

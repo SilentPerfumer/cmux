@@ -34,6 +34,8 @@ struct cmuxApp: App {
 
         Self.configureGhosttyEnvironment()
         StartupBreadcrumbLog.append("app.init.ghosttyEnvironment.configured")
+        DemiCmuxConfigSync.syncAtLaunchIfPossible()
+        StartupBreadcrumbLog.append("app.init.demiConfigSync.complete")
         _ = KeyboardShortcutSettings.settingsFileStore
         StartupBreadcrumbLog.append("app.init.keyboardShortcuts.loaded")
 
@@ -4894,7 +4896,12 @@ enum GeminiIntegrationSettings {
 }
 
 enum WelcomeSettings {
-    static let shownKey = "cmuxWelcomeShown"
+    static var shownKey: String {
+        if Bundle.main.bundleIdentifier?.hasPrefix("com.foundationos.demi-c") == true {
+            return "demiCWelcomeShown"
+        }
+        return "cmuxWelcomeShown"
+    }
 }
 
 enum TelemetrySettings {
