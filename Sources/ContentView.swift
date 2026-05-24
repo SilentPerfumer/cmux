@@ -1975,23 +1975,36 @@ struct ContentView: View {
     }
 
     private var sidebarView: some View {
-        VerticalTabsSidebar(
-            updateViewModel: updateViewModel,
-            fileExplorerState: fileExplorerState,
-            windowId: windowId,
-            onSendFeedback: presentFeedbackComposer,
-            onToggleSidebar: { sidebarState.toggle() },
-            onNewTab: {
-                AppDelegate.shared?.performNewWorkspaceAction(
-                    tabManager: tabManager,
-                    debugSource: "titlebar.hiddenNewWorkspace"
+        Group {
+            if DemiOverlaySettings.isEnabled {
+                DemiTmuxWindowSidebar(
+                    onNewWorkspace: {
+                        AppDelegate.shared?.performNewWorkspaceAction(
+                            tabManager: tabManager,
+                            debugSource: "demi.sidebar.newWorkspace"
+                        )
+                    }
                 )
-            },
-            observedWindow: observedWindow,
-            selection: $sidebarSelectionState.selection,
-            selectedTabIds: $selectedTabIds,
-            lastSidebarSelectionIndex: $lastSidebarSelectionIndex
-        )
+            } else {
+                VerticalTabsSidebar(
+                    updateViewModel: updateViewModel,
+                    fileExplorerState: fileExplorerState,
+                    windowId: windowId,
+                    onSendFeedback: presentFeedbackComposer,
+                    onToggleSidebar: { sidebarState.toggle() },
+                    onNewTab: {
+                        AppDelegate.shared?.performNewWorkspaceAction(
+                            tabManager: tabManager,
+                            debugSource: "titlebar.hiddenNewWorkspace"
+                        )
+                    },
+                    observedWindow: observedWindow,
+                    selection: $sidebarSelectionState.selection,
+                    selectedTabIds: $selectedTabIds,
+                    lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+                )
+            }
+        }
         .frame(width: sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }

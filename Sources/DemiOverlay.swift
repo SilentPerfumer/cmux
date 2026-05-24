@@ -123,6 +123,27 @@ enum DemiCmuxConfigSync {
         defaultLaunchContext()?.command
     }
 
+    static func tmuxSessionName(forWorkspaceTitle title: String?, currentDirectory: String?) -> String {
+        guard DemiOverlaySettings.isEnabled else { return "demi-agent" }
+        guard let registry = try? loadRegistry().registry else { return "demi-agent" }
+        let normalizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedDirectory = currentDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !normalizedTitle.isEmpty,
+           let titleMatch = registry.sessions.first(where: { $0.isLaunchable && $0.displayName == normalizedTitle }) {
+            return titleMatch.tmuxSession
+        }
+
+        if !normalizedDirectory.isEmpty,
+           let directoryMatch = registry.sessions.first(where: { session in
+               session.isLaunchable && normalizedDirectory.hasPrefix(session.repoPath)
+           }) {
+            return directoryMatch.tmuxSession
+        }
+
+        return registry.sessions.first(where: { $0.id == "demi" })?.tmuxSession ?? "demi-agent"
+    }
+
     static func loadRegistry() throws -> (fileURL: URL, registry: DemiRegistryFile) {
         var failures: [String] = []
         for fileURL in registryCandidates where FileManager.default.fileExists(atPath: fileURL.path) {
@@ -249,11 +270,7 @@ enum DemiCmuxConfigSync {
         let fileURL = launchScriptsDirectory
             .appendingPathComponent(safeFileName(session.id))
             .appendingPathExtension("sh")
-        let script = """
-        #!/bin/bash
-        set -e
-        \(launchCommand(for: session, registry: registry))
-        """
+        let script = launchScript(for: session, registry: registry)
         let wrote = try writeIfChanged(script + "\n", to: fileURL)
         if wrote || !FileManager.default.isExecutableFile(atPath: fileURL.path) {
             try FileManager.default.setAttributes(
@@ -262,6 +279,29 @@ enum DemiCmuxConfigSync {
             )
         }
         return fileURL
+    }
+
+    private static func launchScript(for session: DemiRegistrySession, registry: DemiRegistryFile) -> String {
+        let fallbackCommand = claudeCommand(for: session, registry: registry)
+        return """
+        #!/bin/bash
+        set -e
+        unset TMUX
+
+        export DEMI_SESSION_ID=\(shellQuoted(session.id))
+        export DEMI_TMUX_SESSION=\(shellQuoted(session.tmuxSession))
+        export DEMI_WORKSPACE_ROLE=\(shellQuoted(session.role))
+
+        cd \(shellQuoted(session.repoPath))
+
+        TMUX_BIN="${TMUX_BIN:-$(command -v tmux || true)}"
+        if [ -z "$TMUX_BIN" ]; then
+          echo "DEMI-C: tmux not found. Install tmux or set TMUX_BIN." >&2
+          exit 127
+        fi
+
+        exec "$TMUX_BIN" new-session -A -s "$DEMI_TMUX_SESSION" -c "$PWD" \(shellQuoted(fallbackCommand))
+        """
     }
 
     private static func writeIfChanged(_ string: String, to url: URL) throws -> Bool {
@@ -276,17 +316,11 @@ enum DemiCmuxConfigSync {
         return true
     }
 
-    private static func launchCommand(for session: DemiRegistrySession, registry: DemiRegistryFile) -> String {
+    private static func claudeCommand(for session: DemiRegistrySession, registry: DemiRegistryFile) -> String {
         let commandKey = session.claudeCommand ?? "standard"
-        let claudeCommand = registry.claudeDefaults[commandKey]
+        return registry.claudeDefaults[commandKey]
             ?? registry.claudeDefaults["standard"]
             ?? "/Users/main/.second-foundation/bin/claude-vfast --chrome --effort max --permission-mode bypassPermissions"
-        let exports = [
-            "export DEMI_SESSION_ID=\(shellQuoted(session.id))",
-            "export DEMI_TMUX_SESSION=\(shellQuoted(session.tmuxSession))",
-            "export DEMI_WORKSPACE_ROLE=\(shellQuoted(session.role))"
-        ].joined(separator: "; ")
-        return "\(exports); cd \(shellQuoted(session.repoPath)) && exec \(claudeCommand)"
     }
 
     private static func safeFileName(_ value: String) -> String {
@@ -472,5 +506,287 @@ struct DemiOverlayView: View {
         .task {
             model.syncAndReload()
         }
+    }
+}
+
+struct DemiTmuxWindow: Identifiable, Equatable, Sendable {
+    let index: Int
+    let name: String
+    let isActive: Bool
+    let flags: String
+
+    var id: Int { index }
+}
+
+@MainActor
+final class DemiTmuxWindowListModel: ObservableObject {
+    @Published private(set) var windows: [DemiTmuxWindow] = []
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var sessionName = "demi-agent"
+
+    private var refreshTask: Task<Void, Never>?
+
+    func start(sessionName nextSessionName: String) {
+        guard sessionName != nextSessionName || refreshTask == nil else { return }
+        refreshTask?.cancel()
+        sessionName = nextSessionName
+        windows = []
+        errorMessage = nil
+
+        refreshTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    func stop() {
+        refreshTask?.cancel()
+        refreshTask = nil
+    }
+
+    func refresh() async {
+        let session = sessionName
+        do {
+            let output = try await Task.detached(priority: .utility) {
+                try Self.runTmux([
+                    "list-windows",
+                    "-t", session,
+                    "-F", "#{window_index}\t#{window_name}\t#{window_active}\t#{window_flags}"
+                ])
+            }.value
+            windows = Self.parseWindows(output)
+            errorMessage = nil
+        } catch {
+            windows = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func select(_ window: DemiTmuxWindow) {
+        let session = sessionName
+        Task {
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try Self.runTmux(["select-window", "-t", "\(session):\(window.index)"])
+                }.value
+                await refresh()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private static func parseWindows(_ output: String) -> [DemiTmuxWindow] {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line in
+                let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count >= 4, let index = Int(parts[0]) else { return nil }
+                return DemiTmuxWindow(
+                    index: index,
+                    name: parts[1].trimmingCharacters(in: .whitespacesAndNewlines),
+                    isActive: parts[2] == "1",
+                    flags: parts[3].trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+    }
+
+    nonisolated private static func runTmux(_ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["tmux"] + arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            let message = error.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw DemiCmuxError.message(message.isEmpty ? "tmux exited with status \(process.terminationStatus)." : message)
+        }
+        return output
+    }
+}
+
+struct DemiTmuxWindowSidebar: View {
+    let onNewWorkspace: () -> Void
+
+    @EnvironmentObject private var tabManager: TabManager
+    @StateObject private var model = DemiTmuxWindowListModel()
+
+    private var selectedWorkspace: Workspace? {
+        tabManager.selectedWorkspace
+    }
+
+    private var tmuxSessionName: String {
+        DemiCmuxConfigSync.tmuxSessionName(
+            forWorkspaceTitle: selectedWorkspace?.title,
+            currentDirectory: selectedWorkspace?.currentDirectory
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            workspaceStrip
+            Divider()
+            windowHeader
+            windowList
+        }
+        .background(Color.clear)
+        .task {
+            model.start(sessionName: tmuxSessionName)
+        }
+        .onChange(of: tmuxSessionName) { _, newValue in
+            model.start(sessionName: newValue)
+        }
+        .onDisappear {
+            model.stop()
+        }
+        .accessibilityIdentifier("DemiTmuxWindowSidebar")
+    }
+
+    private var workspaceStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("WORKSPACES")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: onNewWorkspace) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("New workspace")
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(tabManager.tabs) { workspace in
+                        workspaceButton(workspace)
+                    }
+                }
+            }
+        }
+        .padding(.top, 38)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+    }
+
+    private var windowHeader: some View {
+        HStack(spacing: 6) {
+            Text("WINDOWS")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            Text(model.sessionName)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary.opacity(0.82))
+                .lineLimit(1)
+            Spacer()
+            Button {
+                Task { await model.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .help("Refresh tmux windows")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private var windowList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 3) {
+                if let error = model.errorMessage {
+                    Text(error)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.red)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                ForEach(model.windows) { window in
+                    Button {
+                        model.select(window)
+                    } label: {
+                        windowRow(window)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 14)
+        }
+        .modifier(ClearScrollBackground())
+    }
+
+    private func workspaceButton(_ workspace: Workspace) -> some View {
+        let isSelected = workspace.id == tabManager.selectedTabId
+        return Button {
+            tabManager.selectWorkspace(workspace)
+        } label: {
+            Text(workspace.title)
+                .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.82))
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(workspace.title)
+    }
+
+    private func windowRow(_ window: DemiTmuxWindow) -> some View {
+        HStack(spacing: 8) {
+            Text("\(window.index)")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(window.isActive ? Color.accentColor : Color.secondary)
+                .frame(width: 22, alignment: .trailing)
+
+            Circle()
+                .fill(window.isActive ? Color.accentColor : Color.secondary.opacity(0.45))
+                .frame(width: 6, height: 6)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(window.name.isEmpty ? "window \(window.index)" : window.name)
+                    .font(.system(size: 12, weight: window.isActive ? .bold : .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if !window.flags.isEmpty {
+                    Text(window.flags)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(window.isActive ? Color.accentColor.opacity(0.17) : Color.primary.opacity(0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(window.isActive ? Color.accentColor.opacity(0.42) : Color.white.opacity(0.06), lineWidth: 1)
+        )
     }
 }
